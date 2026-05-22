@@ -1,0 +1,19 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+SQLAlchemy>=2.0
+asyncmy>=0.2
+
+pydantic>=2.7
+pydantic-settings>=2.4
+
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7
+
+python-multipart>=0.0.9
+
+httpx>=0.27
+
+# passlib 1.7.x expects bcrypt's legacy __about__.__version__
+bcrypt==3.2.2
+

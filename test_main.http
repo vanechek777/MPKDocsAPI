@@ -1,0 +1,51 @@
+# Test your FastAPI endpoints
+
+GET http://127.0.0.1:8000/
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/hello/User
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/health
+Accept: application/json
+
+###
+
+# Login (replace with real user/password from DB)
+POST http://127.0.0.1:8000/auth/login
+Content-Type: application/json
+
+{
+  "phone_number": "+79148012594",
+  "password": "password"
+}
+
+###
+
+POST http://127.0.0.1:8000/auth/otp/send
+Authorization: Bearer {{token}}
+Accept: application/json
+
+###
+
+# Use token from login response
+GET http://127.0.0.1:8000/users/me
+Authorization: Bearer {{token}}
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/documents/recent?tab=all&limit=50
+Authorization: Bearer {{token}}
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/signing/inbox
+Authorization: Bearer {{token}}
+Accept: application/json
+
