@@ -17,5 +17,16 @@
       "url": "https://mpk-docs.ru",
       "label": "Amvera"
     }
-  ]
+  ],
+  "app_release": {
+    "version": "1.0.1",
+    "build": 1,
+    "min_build": 0,
+    "mandatory": true,
+    "notes": "Небольшие улучшения кода.",
+    "windows_url": "https://mpk-docs.ru.tuna.am/releases/MPKDocuments-1.0.1-b1-windows.exe",
+    "android_url": null,
+    "ios_url": null,
+    "web_url": null
+  }
 }
