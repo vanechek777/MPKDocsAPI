@@ -3,5 +3,19 @@
     "base_url": null,
     "username": null,
     "password": "Upassword"
-  }
+  },
+  "api_endpoints": [
+    {
+      "url": "https://mpk-docs.ru.tuna.am",
+      "label": "По умолчанию"
+    },
+    {
+      "url": "http://127.0.0.1:8000",
+      "label": "Локалка"
+    },
+    {
+      "url": "https://mpk-docs.ru",
+      "label": "Amvera"
+    }
+  ]
 }

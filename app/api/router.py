@@ -1,9 +1,10 @@
 from fastapi import APIRouter
 
-from app.api.routers import admin, auth, departments, documents, health, signatures, signing, staff_register, templates, users
+from app.api.routers import admin, auth, config_public, departments, documents, health, signatures, signing, staff_register, templates, users
 
 api_router = APIRouter()
 api_router.include_router(health.router)
+api_router.include_router(config_public.router)
 api_router.include_router(admin.router)
 api_router.include_router(auth.router)
 api_router.include_router(users.router)

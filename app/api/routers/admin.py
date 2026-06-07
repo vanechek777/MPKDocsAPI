@@ -7,7 +7,7 @@ from datetime import date, datetime, time as dt_time, timezone
 import time
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +16,16 @@ from app.api.deps import require_admin
 from app.core.admin_access import env_admin_user_ids, user_is_admin
 from app.core.audit import log_user_activity
 from app.core.presence import online_within_seconds
-from app.core.runtime_config import get_onec_config, patch_onec_config
+from app.core.config import settings
+from app.core.releases import list_release_files, save_release_file, suggest_next_release
+from app.core.runtime_config import (
+    get_api_endpoints,
+    get_app_release,
+    get_onec_config,
+    patch_onec_config,
+    set_api_endpoints,
+    set_app_release,
+)
 from app.db.models import Department, Document, DocumentCategory, DocumentTemplate, Position, StaffDirectoryEntry, User, UserActivityLog
 from app.services.staff_import import import_staff_rows, parse_staff_file
 from app.db.session import get_db
@@ -575,6 +584,244 @@ class OneCConfigResponse(BaseModel):
     base_url: str | None = None
     username: str | None = None
     has_password: bool = False
+
+
+class ApiEndpointItem(BaseModel):
+    url: str
+    label: str | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _url_http(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s.startswith(("http://", "https://")):
+            raise ValueError("URL должен начинаться с http:// или https://")
+        return s.rstrip("/")
+
+
+class ApiEndpointsResponse(BaseModel):
+    endpoints: list[ApiEndpointItem]
+
+
+class ApiEndpointsUpdateRequest(BaseModel):
+    endpoints: list[ApiEndpointItem] = Field(min_length=1)
+
+
+@router.get("/api-endpoints", response_model=ApiEndpointsResponse)
+async def admin_get_api_endpoints(_: User = Depends(require_admin)) -> ApiEndpointsResponse:
+    items = get_api_endpoints()
+    return ApiEndpointsResponse(
+        endpoints=[ApiEndpointItem(url=e["url"], label=e.get("label")) for e in items]
+    )
+
+
+@router.put("/api-endpoints", response_model=ApiEndpointsResponse)
+async def admin_put_api_endpoints(
+    body: ApiEndpointsUpdateRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> ApiEndpointsResponse:
+    saved = set_api_endpoints([e.model_dump() for e in body.endpoints])
+    await log_user_activity(
+        db,
+        user_id=int(admin.id),
+        action="ADMIN_API_ENDPOINTS",
+        detail=f"count={len(saved)}",
+    )
+    await db.commit()
+    return ApiEndpointsResponse(
+        endpoints=[ApiEndpointItem(url=e["url"], label=e.get("label")) for e in saved]
+    )
+
+
+class AppReleaseItem(BaseModel):
+    version: str = Field(min_length=1, max_length=32)
+    build: int = Field(ge=1)
+    min_build: int = Field(default=0, ge=0)
+    mandatory: bool = False
+    notes: str | None = None
+    windows_url: str | None = None
+    android_url: str | None = None
+    ios_url: str | None = None
+    web_url: str | None = None
+
+    @field_validator("windows_url", "android_url", "ios_url", "web_url")
+    @classmethod
+    def _optional_url(cls, v: str | None) -> str | None:
+        if v is None or not str(v).strip():
+            return None
+        s = str(v).strip()
+        if not s.startswith(("http://", "https://")):
+            raise ValueError("URL должен начинаться с http:// или https://")
+        return s.rstrip("/")
+
+
+class AppReleaseResponse(BaseModel):
+    configured: bool
+    version: str | None = None
+    build: int | None = None
+    min_build: int = 0
+    mandatory: bool = False
+    notes: str | None = None
+    windows_url: str | None = None
+    android_url: str | None = None
+    ios_url: str | None = None
+    web_url: str | None = None
+
+
+def _app_release_response(raw: dict) -> AppReleaseResponse:
+    if not raw:
+        return AppReleaseResponse(configured=False)
+    return AppReleaseResponse(
+        configured=True,
+        version=raw.get("version"),
+        build=raw.get("build"),
+        min_build=int(raw.get("min_build") or 0),
+        mandatory=bool(raw.get("mandatory")),
+        notes=raw.get("notes"),
+        windows_url=raw.get("windows_url"),
+        android_url=raw.get("android_url"),
+        ios_url=raw.get("ios_url"),
+        web_url=raw.get("web_url"),
+    )
+
+
+@router.get("/app-release", response_model=AppReleaseResponse)
+async def admin_get_app_release(_: User = Depends(require_admin)) -> AppReleaseResponse:
+    return _app_release_response(get_app_release())
+
+
+@router.put("/app-release", response_model=AppReleaseResponse)
+async def admin_put_app_release(
+    body: AppReleaseItem,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AppReleaseResponse:
+    try:
+        saved = set_app_release(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await log_user_activity(
+        db,
+        user_id=int(admin.id),
+        action="ADMIN_APP_RELEASE",
+        detail=f"v={saved.get('version')} build={saved.get('build')}",
+    )
+    await db.commit()
+    return _app_release_response(saved)
+
+
+class AppReleaseSuggestResponse(BaseModel):
+    version: str
+    build: int
+    previous_version: str | None = None
+    previous_build: int | None = None
+
+
+class AppReleaseFileInfo(BaseModel):
+    name: str
+    size_bytes: int
+    modified_utc: int
+
+
+class AppReleasePublishResponse(AppReleaseResponse):
+    download_url: str
+    stored_file: str
+    file_size_bytes: int
+    platform: str
+    release_files: list[AppReleaseFileInfo] = []
+
+
+def _resolve_public_base_url(request: Request) -> str:
+    if settings.public_base_url and str(settings.public_base_url).strip():
+        return str(settings.public_base_url).strip().rstrip("/")
+    endpoints = get_api_endpoints()
+    if endpoints and endpoints[0].get("url"):
+        return str(endpoints[0]["url"]).rstrip("/")
+    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{scheme}://{host}".rstrip("/")
+
+
+@router.get("/app-release/suggest", response_model=AppReleaseSuggestResponse)
+async def admin_suggest_app_release(_: User = Depends(require_admin)) -> AppReleaseSuggestResponse:
+    data = suggest_next_release()
+    return AppReleaseSuggestResponse(**data)
+
+
+@router.get("/app-release/files", response_model=list[AppReleaseFileInfo])
+async def admin_list_release_files(_: User = Depends(require_admin)) -> list[AppReleaseFileInfo]:
+    return [AppReleaseFileInfo(**item) for item in list_release_files()]
+
+
+@router.post("/app-release/publish", response_model=AppReleasePublishResponse)
+async def admin_publish_app_release(
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    file: UploadFile = File(...),
+    version: str = Form(...),
+    build: int = Form(...),
+    platform: str = Form("windows"),
+    min_build: int = Form(0),
+    mandatory: bool = Form(False),
+    notes: str | None = Form(None),
+) -> AppReleasePublishResponse:
+    raw = await file.read()
+    plat = (platform or "windows").strip().lower()
+    try:
+        stored = save_release_file(
+            platform=plat,
+            version=version,
+            build=build,
+            filename=file.filename or "release.bin",
+            data=raw,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    base = _resolve_public_base_url(request)
+    download_url = f"{base}/releases/{stored.name}"
+
+    current = get_app_release()
+    payload = {
+        "version": version.strip(),
+        "build": build,
+        "min_build": min_build,
+        "mandatory": mandatory,
+        "notes": notes,
+        "windows_url": current.get("windows_url"),
+        "android_url": current.get("android_url"),
+        "ios_url": current.get("ios_url"),
+        "web_url": current.get("web_url"),
+    }
+    url_key = f"{plat}_url"
+    if url_key in payload:
+        payload[url_key] = download_url
+
+    try:
+        saved = set_app_release(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await log_user_activity(
+        db,
+        user_id=int(admin.id),
+        action="ADMIN_APP_RELEASE_PUBLISH",
+        detail=f"v={saved.get('version')} build={saved.get('build')} platform={plat} file={stored.name}",
+    )
+    await db.commit()
+
+    resp = _app_release_response(saved)
+    files = [AppReleaseFileInfo(**item) for item in list_release_files()]
+    return AppReleasePublishResponse(
+        **resp.model_dump(),
+        download_url=download_url,
+        stored_file=stored.name,
+        file_size_bytes=len(raw),
+        platform=plat,
+        release_files=files,
+    )
 
 
 class OneCConfigUpdateRequest(BaseModel):

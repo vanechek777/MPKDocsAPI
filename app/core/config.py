@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     # Уведомления о документах по SMTP (тот же канал, что OTP на email). Без SMTP — тихий no-op.
     document_notify_email_enabled: bool = True
 
+    # Публичный URL API для ссылок на /releases/… (если пусто — из запроса или api_endpoints).
+    public_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("MPK_PUBLIC_BASE_URL", "PUBLIC_BASE_URL"),
+    )
+
     # Доп. администраторы по id (через запятую), помимо Users.IsAdmin. Пример: "1,5"
     mpk_admin_user_ids: str = Field(default="", validation_alias=AliasChoices("MPK_ADMIN_USER_IDS"))
 
