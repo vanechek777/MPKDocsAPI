@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.staff_policy import is_department_registration_blocked
 from app.db.models import Department, Position, StaffDirectoryEntry
 from app.db.session import get_db
 
@@ -69,6 +70,7 @@ async def suggest_staff(
             department_name=r.department_name,
         )
         for r in rows
+        if not is_department_registration_blocked(r.department_name)
     ]
 
 
@@ -102,4 +104,8 @@ async def list_staff_departments(
         .order_by(Department.Name.asc())
     )
     rows = (await db.execute(stmt)).all()
-    return [StaffDepartmentItem(id=int(r.id), name=r.Name) for r in rows]
+    return [
+        StaffDepartmentItem(id=int(r.id), name=r.Name)
+        for r in rows
+        if not is_department_registration_blocked(r.Name)
+    ]

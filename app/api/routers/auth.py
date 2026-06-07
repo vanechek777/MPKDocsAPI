@@ -29,7 +29,8 @@ from app.core.smtp_otp import (
     send_otp_email,
     smtp_configured,
 )
-from app.db.models import SignatureProfile, StaffDirectoryEntry, User
+from app.core.staff_policy import is_department_registration_blocked
+from app.db.models import Department, SignatureProfile, StaffDirectoryEntry, User
 from app.db.session import get_db
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -97,6 +98,15 @@ async def _require_staff_directory_match(
     position_id: int,
     department_id: int,
 ) -> None:
+    dept_name = (
+        await db.execute(select(Department.Name).where(Department.id == department_id))
+    ).scalar_one_or_none()
+    if is_department_registration_blocked(dept_name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Регистрация для выбранного отдела недоступна.",
+        )
+
     row = (
         await db.execute(
             select(StaffDirectoryEntry.id).where(
