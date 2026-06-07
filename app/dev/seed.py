@@ -14,6 +14,7 @@ from app.db.models import (
     DocumentTask,
     DocumentTemplate,
     Position,
+    StaffDirectoryEntry,
     User,
 )
 from app.db.session import SessionLocal, engine
@@ -94,6 +95,35 @@ async def seed(force: bool = False) -> None:
                 )
                 db.add_all([u_initiator, u_sausage, u_me, u_director])
                 await db.flush()
+
+                db.add_all(
+                    [
+                        StaffDirectoryEntry(
+                            FullName=u_initiator.FullName,
+                            PositionId=u_initiator.PositionId,
+                            DepartmentId=u_initiator.DepartmentId,
+                            isActive=True,
+                        ),
+                        StaffDirectoryEntry(
+                            FullName=u_sausage.FullName,
+                            PositionId=u_sausage.PositionId,
+                            DepartmentId=u_sausage.DepartmentId,
+                            isActive=True,
+                        ),
+                        StaffDirectoryEntry(
+                            FullName=u_me.FullName,
+                            PositionId=u_me.PositionId,
+                            DepartmentId=u_me.DepartmentId,
+                            isActive=True,
+                        ),
+                        StaffDirectoryEntry(
+                            FullName=u_director.FullName,
+                            PositionId=u_director.PositionId,
+                            DepartmentId=u_director.DepartmentId,
+                            isActive=True,
+                        ),
+                    ]
+                )
             else:
                 # DB already has users; do not add reference data to avoid duplicates.
                 u_initiator = (await db.execute(select(User).order_by(User.id.asc()).limit(1))).scalar_one()

@@ -17,8 +17,8 @@ MIN_SEND_INTERVAL_SECONDS = 55
 _lock = asyncio.Lock()
 # normalized email -> (digest, expiry_unix, last_send_unix, user_id)
 _login_by_email: dict[str, tuple[bytes, float, float, int]] = {}
-# normalized email -> (digest, expiry_unix, last_send_unix, phone, full_name, password_hash)
-_pending_register: dict[str, tuple[bytes, float, float, str, str, str]] = {}
+# normalized email -> (digest, expiry, last_send, phone, full_name, password_hash, position_id, department_id)
+_pending_register: dict[str, tuple[bytes, float, float, str, str, str, int, int]] = {}
 
 
 def _digest(code_plain: str) -> bytes:
@@ -83,13 +83,15 @@ async def issue_register_email_code(
     phone: str,
     full_name: str,
     password_hash: str,
+    position_id: int,
+    department_id: int,
 ) -> str:
     now = time.time()
     normalized_email = normalized_email.strip().lower()
     async with _lock:
         prev = _pending_register.get(normalized_email)
         if prev is not None:
-            _, _, last_sent, _, _, _ = prev
+            _, _, last_sent, _, _, _, _, _ = prev
             if now - last_sent < MIN_SEND_INTERVAL_SECONDS:
                 raise OtpCooldownError()
 
@@ -101,11 +103,15 @@ async def issue_register_email_code(
             phone,
             full_name,
             password_hash,
+            int(position_id),
+            int(department_id),
         )
     return code
 
 
-async def verify_register_email_consume(normalized_email: str, code_plain: str) -> tuple[str, str, str] | None:
+async def verify_register_email_consume(
+    normalized_email: str, code_plain: str
+) -> tuple[str, str, str, int, int] | None:
     code_plain = (code_plain or "").strip()
     if not code_plain:
         return None
@@ -115,11 +121,11 @@ async def verify_register_email_consume(normalized_email: str, code_plain: str) 
         entry = _pending_register.get(normalized_email)
         if entry is None:
             return None
-        digest, exp, _, phone, full_name, password_hash = entry
+        digest, exp, _, phone, full_name, password_hash, position_id, department_id = entry
         if now > exp:
             del _pending_register[normalized_email]
             return None
         if not hmac.compare_digest(digest, _digest_reg(code_plain)):
             return None
         del _pending_register[normalized_email]
-        return (phone, full_name, password_hash)
+        return (phone, full_name, password_hash, position_id, department_id)

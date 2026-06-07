@@ -7,8 +7,7 @@ build:
   requirementsPath: requirements.txt
   useCache: true
 run:
-  scriptName: seed.py
-  command: null
+  command: python seed.py && uvicorn main:app --host 0.0.0.0 --port 80
   persistenceMount: /data
   containerPort: "80"
   servicePort: "80"

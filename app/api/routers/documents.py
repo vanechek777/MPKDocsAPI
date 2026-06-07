@@ -34,6 +34,7 @@ from app.services.signing_turn import (
     active_pending_step_by_document,
     select_actionable_pending_task,
     user_pending_steps_by_document,
+    user_task_match,
     waiting_for_others_signers,
 )
 
@@ -75,6 +76,36 @@ async def user_can_access_document(db: AsyncSession, user: User, document_id: in
         if (n_dept or 0) > 0:
             return True
     return False
+
+
+def _document_visible_to_user(user: User):
+    """SQL: документ виден пользователю (инициатор, назначенный подписант или его подразделение)."""
+    by_initiator = Document.InitiatorId == user.id
+    by_user_task = exists(
+        select(1)
+        .select_from(DocumentTask)
+        .where(
+            and_(
+                DocumentTask.DocumentId == Document.id,
+                DocumentTask.AssignedUserId == user.id,
+            )
+        )
+    )
+    parts = [by_initiator, by_user_task]
+    if user.DepartmentId is not None:
+        by_dept_task = exists(
+            select(1)
+            .select_from(DocumentTask)
+            .where(
+                and_(
+                    DocumentTask.DocumentId == Document.id,
+                    DocumentTask.AssignedUserId.is_(None),
+                    DocumentTask.AssignedDepartmentId == user.DepartmentId,
+                )
+            )
+        )
+        parts.append(by_dept_task)
+    return or_(*parts)
 
 
 class DocumentListItem(BaseModel):
@@ -339,6 +370,43 @@ async def delete_my_draft(
     return None
 
 
+class FeedStampResponse(BaseModel):
+    stamp: str
+
+
+@router.get("/feed-stamp", response_model=FeedStampResponse)
+async def document_feed_stamp(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> FeedStampResponse:
+    """Компактная метка для polling: новые документы / задачи у пользователя."""
+    pending_inbox = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(DocumentTask)
+                .where(
+                    DocumentTask.Status == "PENDING",
+                    user_task_match(user),
+                )
+            )
+        ).scalar_one()
+        or 0
+    )
+    max_doc = (
+        await db.execute(
+            select(func.max(Document.id)).where(_document_visible_to_user(user))
+        )
+    ).scalar_one()
+    max_task = (
+        await db.execute(
+            select(func.max(DocumentTask.id)).where(user_task_match(user))
+        )
+    ).scalar_one()
+    stamp = f"p{pending_inbox}:d{int(max_doc or 0)}:t{int(max_task or 0)}"
+    return FeedStampResponse(stamp=stamp)
+
+
 @router.get("/recent", response_model=list[DocumentListItem])
 async def recent_documents(
     limit: int = 50,
@@ -390,13 +458,16 @@ async def recent_documents(
     if tab == "sent":
         stmt = stmt.where(Document.InitiatorId == user.id)
     elif tab == "received":
-        # documents where current user has at least one task
-        exists_task = (
-            select(func.count())
-            .select_from(DocumentTask)
-            .where(and_(DocumentTask.DocumentId == Document.id, DocumentTask.AssignedUserId == user.id))
+        stmt = stmt.where(
+            exists(
+                select(1)
+                .select_from(DocumentTask)
+                .where(and_(DocumentTask.DocumentId == Document.id, user_task_match(user)))
+            )
         )
-        stmt = stmt.where(exists_task.scalar_subquery() > 0)
+    else:
+        # tab=all — только документы, где пользователь участник маршрута (не все документы системы)
+        stmt = stmt.where(_document_visible_to_user(user))
 
     # Черновики не показываем в «Недавних» (все / полученные / отправленные) — только GET /documents/drafts.
     stmt = stmt.where(func.upper(func.coalesce(Document.Status, "")) != "DRAFT")
@@ -795,6 +866,9 @@ async def get_document_detail(
     doc: Document = doc_row[0]
     initiator_name: str = doc_row[1]
     template_name: str = doc_row[2]
+
+    if not await user_can_access_document(db, user, document_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к документу")
 
     content = (
         await db.execute(select(DocumentContent.DataJson).where(DocumentContent.DocumentId == document_id))

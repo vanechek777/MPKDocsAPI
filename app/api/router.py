@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routers import admin, auth, departments, documents, health, signatures, signing, templates, users
+from app.api.routers import admin, auth, departments, documents, health, signatures, signing, staff_register, templates, users
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -12,4 +12,5 @@ api_router.include_router(documents.router)
 api_router.include_router(signatures.router)
 api_router.include_router(signing.router)
 api_router.include_router(templates.router)
+api_router.include_router(staff_register.router)
 

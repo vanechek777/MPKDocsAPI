@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
+from datetime import date, datetime, time as dt_time, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import time
+
+import httpx
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +16,9 @@ from app.api.deps import require_admin
 from app.core.admin_access import env_admin_user_ids, user_is_admin
 from app.core.audit import log_user_activity
 from app.core.presence import online_within_seconds
-from app.db.models import Document, DocumentCategory, DocumentTemplate, User, UserActivityLog
+from app.core.runtime_config import get_onec_config, patch_onec_config
+from app.db.models import Department, Document, DocumentCategory, DocumentTemplate, Position, StaffDirectoryEntry, User, UserActivityLog
+from app.services.staff_import import import_staff_rows, parse_staff_file
 from app.db.session import get_db
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -84,28 +88,102 @@ class ActivityItem(BaseModel):
     detail: str | None = None
 
 
+def _activity_created_at_bounds(
+    from_date: date | None,
+    to_date: date | None,
+) -> tuple[datetime | None, datetime | None]:
+    """Границы суток UTC для фильтра CreatedAt (в БД — naive UTC)."""
+    start: datetime | None = None
+    end: datetime | None = None
+    if from_date is not None:
+        start = datetime.combine(from_date, dt_time.min)
+    if to_date is not None:
+        end = datetime.combine(to_date, dt_time(23, 59, 59, 999999))
+    return start, end
+
+
+async def _fetch_activity_rows(
+    db: AsyncSession,
+    *,
+    limit: int,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> list:
+    limit = min(max(limit, 1), 250)
+    start, end = _activity_created_at_bounds(from_date, to_date)
+    stmt = (
+        select(
+            UserActivityLog.id,
+            UserActivityLog.CreatedAt,
+            UserActivityLog.UserId,
+            UserActivityLog.Action,
+            UserActivityLog.Detail,
+            User.FullName,
+        )
+        .outerjoin(User, User.id == UserActivityLog.UserId)
+        .order_by(UserActivityLog.id.desc())
+        .limit(limit)
+    )
+    if start is not None:
+        stmt = stmt.where(UserActivityLog.CreatedAt >= start)
+    if end is not None:
+        stmt = stmt.where(UserActivityLog.CreatedAt <= end)
+    return (await db.execute(stmt)).all()
+
+
+@router.get("/activity/export")
+async def admin_activity_export(
+    from_date: date | None = Query(None, alias="from"),
+    to_date: date | None = Query(None, alias="to"),
+    limit: int = Query(250, ge=1, le=250),
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Текстовый журнал за период (до 250 записей, новые сверху)."""
+    from fastapi.responses import PlainTextResponse
+
+    rows = await _fetch_activity_rows(db, limit=limit, from_date=from_date, to_date=to_date)
+    lines: list[str] = [
+        "Журнал действий — МПК Документы",
+        f"Сформировано (UTC): {datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat()}",
+    ]
+    if from_date is not None or to_date is not None:
+        f = from_date.isoformat() if from_date else "…"
+        t = to_date.isoformat() if to_date else "…"
+        lines.append(f"Период: {f} — {t}")
+    lines.append(f"Записей в выгрузке: {len(rows)} (лимит {limit})")
+    lines.append("")
+    lines.append("Время (UTC)\tПользователь\tДействие\tДетали")
+    lines.append("-" * 72)
+    for r in rows:
+        ca = r.CreatedAt.isoformat() if r.CreatedAt else ""
+        uname = (r.FullName or "").strip() or (str(r.UserId) if r.UserId is not None else "")
+        detail = (r.Detail or "").replace("\t", " ").replace("\r", " ").replace("\n", " ")
+        lines.append(f"{ca}\t{uname}\t{r.Action}\t{detail}")
+    body = "\n".join(lines) + "\n"
+    fname = "mpk-activity-log.txt"
+    if from_date and to_date:
+        fname = f"mpk-activity_{from_date.isoformat()}_{to_date.isoformat()}.txt"
+    elif from_date:
+        fname = f"mpk-activity_from_{from_date.isoformat()}.txt"
+    elif to_date:
+        fname = f"mpk-activity_to_{to_date.isoformat()}.txt"
+    return PlainTextResponse(
+        content=body,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @router.get("/activity", response_model=list[ActivityItem])
 async def admin_activity(
-    limit: int = 40,
+    limit: int = Query(10, ge=1, le=250),
+    from_date: date | None = Query(None, alias="from"),
+    to_date: date | None = Query(None, alias="to"),
     _: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[ActivityItem]:
-    limit = min(max(limit, 1), 200)
-    rows = (
-        await db.execute(
-            select(
-                UserActivityLog.id,
-                UserActivityLog.CreatedAt,
-                UserActivityLog.UserId,
-                UserActivityLog.Action,
-                UserActivityLog.Detail,
-                User.FullName,
-            )
-            .outerjoin(User, User.id == UserActivityLog.UserId)
-            .order_by(UserActivityLog.id.desc())
-            .limit(limit)
-        )
-    ).all()
+    rows = await _fetch_activity_rows(db, limit=limit, from_date=from_date, to_date=to_date)
     out: list[ActivityItem] = []
     for r in rows:
         ca = r.CreatedAt.isoformat() if r.CreatedAt else None
@@ -421,3 +499,149 @@ async def admin_patch_template(
         is_active=t.isActive,
         template_path=t.TemplatePath,
     )
+
+
+class StaffStatsResponse(BaseModel):
+    staff_total: int
+    positions_total: int
+    departments_total: int
+
+
+@router.get("/staff/stats", response_model=StaffStatsResponse)
+async def staff_stats(
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> StaffStatsResponse:
+    staff_total = int(
+        (
+            await db.execute(
+                select(func.count()).select_from(StaffDirectoryEntry).where(StaffDirectoryEntry.isActive.is_(True))
+            )
+        ).scalar_one()
+        or 0
+    )
+    positions_total = int((await db.execute(select(func.count()).select_from(Position))).scalar_one() or 0)
+    departments_total = int((await db.execute(select(func.count()).select_from(Department))).scalar_one() or 0)
+    return StaffStatsResponse(
+        staff_total=staff_total,
+        positions_total=positions_total,
+        departments_total=departments_total,
+    )
+
+
+class StaffImportResponse(BaseModel):
+    rows_total: int
+    rows_imported: int
+    departments_upserted: int
+    positions_upserted: int
+    staff_upserted: int
+
+
+@router.post("/staff/import", response_model=StaffImportResponse)
+async def staff_import_file(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    file: UploadFile = File(...),
+) -> StaffImportResponse:
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Пустой файл")
+    try:
+        rows = parse_staff_file(file.filename or "import.csv", raw)
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Не найдены строки. Ожидаются колонки: ФИО, Должность, Отдел.",
+        )
+    stats = await import_staff_rows(db, rows)
+    await log_user_activity(
+        db,
+        user_id=int(admin.id),
+        action="ADMIN_STAFF_IMPORT",
+        detail=f"rows={stats.rows_imported}",
+    )
+    return StaffImportResponse(
+        rows_total=stats.rows_total,
+        rows_imported=stats.rows_imported,
+        departments_upserted=stats.departments_upserted,
+        positions_upserted=stats.positions_upserted,
+        staff_upserted=stats.staff_upserted,
+    )
+
+
+class OneCConfigResponse(BaseModel):
+    base_url: str | None = None
+    username: str | None = None
+    has_password: bool = False
+
+
+class OneCConfigUpdateRequest(BaseModel):
+    base_url: str | None = None
+    username: str | None = None
+    password: str | None = None
+
+
+@router.get("/onec/config", response_model=OneCConfigResponse)
+async def onec_get_config(_: User = Depends(require_admin)) -> OneCConfigResponse:
+    cfg = get_onec_config()
+    return OneCConfigResponse(
+        base_url=cfg.get("base_url"),
+        username=cfg.get("username"),
+        has_password=bool(cfg.get("password")),
+    )
+
+
+@router.put("/onec/config", response_model=OneCConfigResponse)
+async def onec_put_config(
+    body: OneCConfigUpdateRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> OneCConfigResponse:
+    cfg = patch_onec_config(
+        base_url=body.base_url,
+        username=body.username,
+        password=body.password,
+    )
+    await log_user_activity(db, user_id=int(admin.id), action="ADMIN_ONEC_CONFIG", detail=cfg.get("base_url"))
+    await db.commit()
+    return OneCConfigResponse(
+        base_url=cfg.get("base_url"),
+        username=cfg.get("username"),
+        has_password=bool(cfg.get("password")),
+    )
+
+
+class OneCTestResponse(BaseModel):
+    ok: bool
+    latency_ms: float | None = None
+    message: str | None = None
+
+
+@router.post("/onec/test", response_model=OneCTestResponse)
+async def onec_test_connection(_: User = Depends(require_admin)) -> OneCTestResponse:
+    cfg = get_onec_config()
+    base = (cfg.get("base_url") or "").strip().rstrip("/")
+    if not base:
+        return OneCTestResponse(ok=False, message="Укажите URL сервера 1С в мастере подключения.")
+    url = base if base.endswith("/health") else f"{base}/health"
+    t0 = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            auth = None
+            user = cfg.get("username")
+            pwd = cfg.get("password")
+            if user and pwd:
+                auth = (str(user), str(pwd))
+            res = await client.get(url, auth=auth)
+        ms = (time.perf_counter() - t0) * 1000.0
+        if res.status_code >= 400:
+            return OneCTestResponse(
+                ok=False,
+                latency_ms=ms,
+                message=f"HTTP {res.status_code} от {url}",
+            )
+        return OneCTestResponse(ok=True, latency_ms=ms, message="Соединение с 1С установлено.")
+    except Exception as e:
+        return OneCTestResponse(ok=False, message=str(e))

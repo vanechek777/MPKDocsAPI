@@ -29,7 +29,7 @@ from app.core.smtp_otp import (
     send_otp_email,
     smtp_configured,
 )
-from app.db.models import SignatureProfile, User
+from app.db.models import SignatureProfile, StaffDirectoryEntry, User
 from app.db.session import get_db
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -81,11 +81,37 @@ class RegisterRequest(BaseModel):
     full_name: str
     password: str
     email: str
+    position_id: int = Field(..., ge=1)
+    department_id: int = Field(..., ge=1)
 
     @field_validator("email")
     @classmethod
     def _email(cls, v: object) -> str:
         return _normalize_register_email(v)
+
+
+async def _require_staff_directory_match(
+    db: AsyncSession,
+    *,
+    full_name: str,
+    position_id: int,
+    department_id: int,
+) -> None:
+    row = (
+        await db.execute(
+            select(StaffDirectoryEntry.id).where(
+                func.lower(StaffDirectoryEntry.FullName) == full_name.strip().lower(),
+                StaffDirectoryEntry.PositionId == position_id,
+                StaffDirectoryEntry.DepartmentId == department_id,
+                StaffDirectoryEntry.isActive.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Вы не найдены в кадровом справочнике. Обратитесь к администратору.",
+        )
 
 
 class RegisterResponse(BaseModel):
@@ -99,7 +125,7 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         await db.execute(select(User.id).where(User.PhoneNumber == payload.phone_number))
     ).scalar_one_or_none()
     if existing is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Phone number already registered")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Этот номер телефона уже зарегистрирован.")
 
     email_taken = (
         await db.execute(
@@ -110,12 +136,21 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         )
     ).scalar_one_or_none()
     if email_taken is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Этот email уже зарегистрирован.")
+
+    await _require_staff_directory_match(
+        db,
+        full_name=payload.full_name,
+        position_id=payload.position_id,
+        department_id=payload.department_id,
+    )
 
     user = User(
         PhoneNumber=payload.phone_number,
         Email=payload.email,
         FullName=payload.full_name,
+        PositionId=payload.position_id,
+        DepartmentId=payload.department_id,
         Status=True,
         PasswordHash=hash_password(payload.password),
         IsAdmin=False,
@@ -414,7 +449,14 @@ async def email_register_start(payload: RegisterRequest, db: AsyncSession = Depe
         )
     ).scalar_one_or_none()
     if email_taken is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Этот email уже зарегистрирован.")
+
+    await _require_staff_directory_match(
+        db,
+        full_name=payload.full_name,
+        position_id=payload.position_id,
+        department_id=payload.department_id,
+    )
 
     try:
         code = await issue_register_email_code(
@@ -422,6 +464,8 @@ async def email_register_start(payload: RegisterRequest, db: AsyncSession = Depe
             phone=payload.phone_number.strip(),
             full_name=payload.full_name.strip(),
             password_hash=hash_password(payload.password),
+            position_id=payload.position_id,
+            department_id=payload.department_id,
         )
     except OtpCooldownError:
         raise HTTPException(
@@ -483,7 +527,7 @@ async def email_register_verify(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Неверный или просроченный код.",
         )
-    phone_number, full_name, password_hash = pending
+    phone_number, full_name, password_hash, position_id, department_id = pending
 
     existing_phone = (
         await db.execute(select(User.id).where(User.PhoneNumber == phone_number))
@@ -502,12 +546,21 @@ async def email_register_verify(
         )
     ).scalar_one_or_none()
     if email_taken is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Этот email уже зарегистрирован.")
+
+    await _require_staff_directory_match(
+        db,
+        full_name=full_name,
+        position_id=position_id,
+        department_id=department_id,
+    )
 
     user = User(
         PhoneNumber=phone_number,
         Email=email,
         FullName=full_name,
+        PositionId=position_id,
+        DepartmentId=department_id,
         Status=True,
         PasswordHash=password_hash,
         IsAdmin=False,

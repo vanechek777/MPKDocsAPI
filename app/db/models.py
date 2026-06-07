@@ -31,6 +31,22 @@ class Position(Base):
     isActive: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
 
 
+class StaffDirectoryEntry(Base):
+    """Кадровый справочник (1С / Excel) — допуск к регистрации по ФИО + должность + отдел."""
+
+    __tablename__ = "StaffDirectory"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    FullName: Mapped[str] = mapped_column(String(255), nullable=False)
+    PositionId: Mapped[int] = mapped_column(ForeignKey("Positions.id"), nullable=False)
+    DepartmentId: Mapped[int] = mapped_column(ForeignKey("Departments.id"), nullable=False)
+    OneCId: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    isActive: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
+
+    position: Mapped[Position | None] = relationship()
+    department: Mapped[Department | None] = relationship()
+
+
 class User(Base):
     __tablename__ = "Users"
     __table_args__ = (UniqueConstraint("PhoneNumber", name="UQ_Users_PhoneNumber"),)
