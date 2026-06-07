@@ -24,8 +24,9 @@ from app.core.email_auth_otp import (
 )
 from app.core.smtp_otp import (
     SmtpSendError,
-    build_otp_email_plain_and_html,
+    build_login_otp_email_plain_and_html,
     build_registration_otp_email_plain_and_html,
+    build_signing_otp_email_plain_and_html,
     send_otp_email,
     smtp_configured,
 )
@@ -235,7 +236,7 @@ async def send_signing_otp(user: User = Depends(get_current_user)) -> OtpSendRes
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Укажите email в профиле: PATCH /users/me с полем email.",
             )
-        plain, html_body = build_otp_email_plain_and_html(code)
+        plain, html_body = build_signing_otp_email_plain_and_html(code)
         try:
             await send_otp_email(
                 to_addr=email_to,
@@ -396,7 +397,7 @@ async def email_login_send_code(
         )
 
     to_addr = (user.Email or "").strip()
-    plain, html_body = build_otp_email_plain_and_html(code)
+    plain, html_body = build_login_otp_email_plain_and_html(code)
     try:
         await send_otp_email(
             to_addr=to_addr,

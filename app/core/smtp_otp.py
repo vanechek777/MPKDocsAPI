@@ -29,8 +29,8 @@ def _from_address() -> str:
     return (settings.smtp_from or settings.smtp_user or "").strip()
 
 
-def build_otp_email_plain_and_html(code: str) -> tuple[str, str]:
-    """Текстовая и HTML-версия письма с кодом (для multipart/alternative)."""
+def build_login_otp_email_plain_and_html(code: str) -> tuple[str, str]:
+    """Письмо с кодом для входа по email."""
     raw = (code or "").strip()
     safe_html = html.escape(raw, quote=True)
     plain = (
@@ -51,6 +51,34 @@ def build_otp_email_plain_and_html(code: str) -> tuple[str, str]:
 </body>
 </html>"""
     return plain, body_html
+
+
+def build_signing_otp_email_plain_and_html(code: str) -> tuple[str, str]:
+    """Письмо с кодом для подписания документа (НЭП)."""
+    raw = (code or "").strip()
+    safe_html = html.escape(raw, quote=True)
+    plain = (
+        "Здравствуйте,\n\n"
+        f"Ваш код для подписания документа в МПК.Документы: {raw}\n\n"
+        "Код действует 10 минут. Если вы не подписывали документ, просто проигнорируйте письмо.\n\n"
+        "Поддержка: mpkchita.ru"
+    )
+    body_html = f"""<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="utf-8"></head>
+<body>
+<p>Здравствуйте,</p>
+<p>Ваш код для <strong>подписания документа</strong> в МПК.Документы:</p>
+<h2 style="letter-spacing:6px;font:700 24px system-ui">{safe_html}</h2>
+<p>Код действует 10 минут. Если вы не подписывали документ, просто проигнорируйте письмо.</p>
+<p style="color:#666;font-size:12px">Поддержка: mpkchita.ru</p>
+</body>
+</html>"""
+    return plain, body_html
+
+
+# Обратная совместимость импортов
+build_otp_email_plain_and_html = build_login_otp_email_plain_and_html
 
 
 def build_registration_otp_email_plain_and_html(code: str) -> tuple[str, str]:
