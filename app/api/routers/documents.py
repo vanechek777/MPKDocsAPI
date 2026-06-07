@@ -393,17 +393,53 @@ async def document_feed_stamp(
         ).scalar_one()
         or 0
     )
+    visible = _document_visible_to_user(user)
+
     max_doc = (
-        await db.execute(
-            select(func.max(Document.id)).where(_document_visible_to_user(user))
-        )
+        await db.execute(select(func.max(Document.id)).where(visible))
     ).scalar_one()
     max_task = (
         await db.execute(
             select(func.max(DocumentTask.id)).where(user_task_match(user))
         )
     ).scalar_one()
-    stamp = f"p{pending_inbox}:d{int(max_doc or 0)}:t{int(max_task or 0)}"
+
+    status_rows = (
+        await db.execute(
+            select(Document.Status, func.count())
+            .where(visible, Document.Status.isnot(None), Document.Status != "DRAFT")
+            .group_by(Document.Status)
+        )
+    ).all()
+    status_sig = ",".join(
+        f"{(row[0] or '').upper()}:{int(row[1])}"
+        for row in sorted(status_rows, key=lambda r: r[0] or "")
+    )
+
+    max_processed = (
+        await db.execute(
+            select(func.max(DocumentTask.ProcessedAt)).where(
+                DocumentTask.DocumentId.in_(select(Document.id).where(visible))
+            )
+        )
+    ).scalar_one()
+    max_created = (
+        await db.execute(
+            select(func.max(Document.CreatedAt)).where(
+                visible, Document.Status.isnot(None), Document.Status != "DRAFT"
+            )
+        )
+    ).scalar_one()
+
+    activity_ts = 0
+    for dt in (max_processed, max_created):
+        if dt is not None:
+            activity_ts = max(activity_ts, int(dt.timestamp()))
+
+    stamp = (
+        f"p{pending_inbox}:s{status_sig}:d{int(max_doc or 0)}:"
+        f"t{int(max_task or 0)}:u{activity_ts}"
+    )
     return FeedStampResponse(stamp=stamp)
 
 
